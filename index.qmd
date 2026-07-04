@@ -1,0 +1,110 @@
+---
+title: "Publicación de servicios OGC estándar con GeoServer"
+
+author: "Maria José Duarte - Wilder Clavijo"
+format:
+  html:
+    toc: true
+    number-sections: true
+
+  pdf:
+    toc: true
+    number-sections: true
+    
+    geometry: margin=2cm
+---
+
+
+En este documento se registra la instalación y configuración de GeoServer, la creación de un workspace institucional, la configuración de data stores, la publicación de servicios WMS (Web Map Service) y WFS (Web Feature Service), y el consumo de dichos servicios desde un cliente de escritorio (QGIS), junto a sus evidencias en imagenes y el analisis por medio de un cuestionario.
+
+## Procedimiento 
+
+Despues de instalar el servicio de Geoserver sobre Java e iniciar el servicio en el servidor local 8080, se creó el workspace "Cartografia_UNAL", con Namespace URI "http://www.unal.edu.co/cartografia/". Este identificador opera como una URI (cadena identificadora única) y no como una URL de navegación, evitando colisiones de nombres al integrar las capas con otros visores institucionales.
+
+![Interfaz de administración de GeoServer.](Geoserver_interface.JPG)
+
+Dentro del workspace se configuraron dos almacenes de datos: uno de tipo GeoPackage ("Datos_GeoPackage", apuntando a "colombia_formatos.gpkg") y otro de tipo Shapefiles ("Datos_Shapefiles"), ambos habilitados y disponibles para publicar capas.
+
+![Listado de *Stores* configurados en el workspace "Cartografia_UNAL", ambos habilitados.](Workspace_creation.JPG){#fig-stores width="90%"}
+
+
+Se publicó la capa **departamentos** desde el almacén de Shapefiles, calculando el Native Bounding Box y el Lat/Lon Bounding Box a partir de los datos, y verificando el CRS de la capa. Se creó y aplicó el estilo SLD "Estilo_Simple" (relleno naranja `#ff9900`, borde negro de 0.5 px) como estilo por defecto de la capa.
+
+Finalmente, se habilitaron los servicios **WMS** (v1.3.0) y **WFS** (v2.0.0) a nivel de servidor, y se verificaron sus documentos:
+
+![Respuesta XML de `GetCapabilities` del servicio WMS mostrando la identificación del servicio](WMS_capabilities.JPG){#fig-wms-caps width="90%"}
+
+![Respuesta XML de `GetCapabilities` del servicio WFS mostrando la versión 2.0.0, los namespaces registrados y la capacidad de transacciones.](WFS_capabilities.JPG){#fig-wfs-caps width="90%"}
+
+### Consumo de servicios desde QGIS
+
+La capa "Cartografia_UNAL:departamentos" fue consumida desde QGIS Desktop mediante dos conexiones independientes:
+
+- **Conexión WMS**: se registró la URL y se cargó la capa como imagen rasterizada, y utilizando la herramienta *Identificar objetos espaciales*, se realizó una petición `GetFeatureInfo` sobre el departamento de Antioquia, recuperando sus atributos (ADEP_NOMBR, OBJECTID, área, perímetro) sin necesidad de descargar la geometría completa.
+
+![Consumo del servicio WMS en QGIS: capa "departamentos" renderizada como imagen.](Client_WMS.JPG){#fig-wms-qgis width="90%"}
+
+- **Conexión WFS**: se registró la URL y se cargó la capa como capa vectorial nativa, a diferencia del WMS, la tabla de atributos completa (37 objetos/departamentos) se transfirió íntegramente a memoria local, permitiendo consultas por atributos como las mostradas en el registro de Guajira.
+
+![Consumo del servicio WFS en QGIS: tabla de atributos completa de la capa "departamentos" (37 objetos totales) cargada en memoria local desde el servicio WFS.](Client_WFS.JPG){#fig-wfs-qgis width="90%"}
+
+## Cuestionario 
+
+### Pregunta 1: Diferencias arquitectónicas WMS vs. WFS y ventajas del stateless services
+
+- El modelo cliente-servidor de WMS opera bajo un paradigma de *vista*: el servidor recibe parámetros y devuelve una imagen ya rasterizada (PNG/JPEG/GeoTIFF), recibiendo solo una representación visual; esto se evidenció al construir manualmente la petición aplicando el SLD "Estilo_Simple" y entrega un producto terminado. La operación *Identificar objetos espaciales* en QGIS es la única vía para obtener atributos puntuales, pero no transfiere la capa completa.
+
+- El modelo cliente-servidor de WFS opera bajo un paradigma de *datos*: expone las geometrías y atributos vectoriales crudos (GML, GeoJSON, Shapefile) descargando la estructura completa y pudiendo realizar consultas espaciales o alfanuméricas localmente, como se observó al abrir la tabla de atributos completa de "departamentos" en QGIS, donde los 37 registros se transfirieron íntegramente a memoria local.
+
+El modelo WMS reduce la transferencia de red pero incrementa el cómputo del servidor (render *on-the-fly*); mientras que el modelo WFS incrementa la transferencia de red y la carga del cliente, pero reduce el cómputo del servidor.
+
+- Ventajas de los servicios stateless: Ambos protocolos lo son, cada petición HTTP contiene toda la información necesaria para resolverse de forma independiente, sin que el servidor mantenga sesión ni contexto entre peticiones sucesivas, aportando:
+
+* Escalabilidad horizontal: al no existir estado compartido, es posible balancear peticiones entre múltiples instancias de GeoServer sin sincronizar sesiones.
+* Tolerancia a fallos: si una instancia cae, otra puede atender la siguiente petición sin pérdida de contexto.
+* Cacheabilidad: peticiones idempotentes y deterministas (mismos parámetros = misma respuesta) son ideales para cachear en proxies HTTP o CDNs, base conceptual de WMTS.
+* Simplicidad operativa: no se requiere infraestructura de gestión de sesiones, reduciendo puntos únicos de falla.
+
+### Pregunta 2: Perdida o errores en la transformación de CRS 
+
+1. Naturaleza de las proyecciones: EPSG:9377 es una proyección cónica conforme de Gauss-Krüger optimizada para Colombia, con baja distorsión local mientras que EPSG:3857 es una proyección cilíndrica diseñada para visualización web, que distorsiona áreas de forma creciente con la latitud, al reproyectar distancias y áreas calculadas sobre EPSG:3857 dejan de ser fieles a la realidad geodésica.
+2. Transformación del datum y del sólido de referencia: MAGNA-SIRGAS está ligado al marco SIRGAS (basado en ITRF), mientras que Web Mercator usa una **esfera** —no un elipsoide— como superficie de referencia, lo cual introduce un error sistemático adicional (hasta ~0.33 % en distancias).
+3. Redondeo numérico en el *pipeline* PROJ/GDAL: GeoServer usa GeoTools, que a su vez emplea PROJ; cada transformación acumula pequeños errores de punto flotante, en general insignificantes a escala de visualización, pero relevantes en aplicaciones catastrales de alta precisión.
+
+Gestión de GeoServer: GeoServer delega la transformación a GeoTools/PROJ, resolviendo la cadena "EPSG:9377 → WGS84 → EPSG:3857" de forma *on-the-fly* en cada petición cuyo CRS difiera del CRS nativo de la capa, por lo que las funciones como "Compute from data" y "Compute from native bounds" son esenciales para automatizar y minimizar estos errores. 
+
+### Pregunta 3: Caching de teselas (WMTS) vs. ancho de banda y trade-offs 
+
+Relación caching–ancho de banda: WMTS pregenera un conjunto fijo de teselas en una grilla predefinida (p. ej. esquema Web Mercator) para distintos niveles de zoom en los que cada tesela es un archivo estático que puede servirse directamente desde disco sin invocar el motor de renderizado, reduciendo el uso de CPU del servidor, y puede cachearse en capas intermedias (proxy inverso, CDN, navegador), reduciendo peticiones repetidas, sin embargo, el costo de esta estrategia es el espacio de almacenamiento y el tiempo de pre-cómputo (*seed*), que crece exponencialmente con el nivel de zoom.
+
+**Trade-offs entre WMS dinámico y WMTS pregenerado:**
+
+| Dimensión | WMS (rasterización dinámica) | WMTS (teselas pregeneradas) |
+|---|---|---|
+| Precisión cartográfica | Alta: *bbox* arbitrario, estilos y filtros dinámicos | Limitada a la grilla y niveles de zoom pregenerados |
+| Actualización de datos | Inmediata | Requiere regenerar las teselas afectadas |
+| Rendimiento bajo carga | Degrada con alta concurrencia (limitada por CPU) | Constante y predecible (archivos estáticos) |
+| Flexibilidad de estilos | Alta, cambia por petición | Baja, congelada en la tesela |
+| Almacenamiento | Ninguno adicional | Alto, proporcional a zoom × extensión |
+| Caso de uso ideal | Capas temáticas dinámicas, consultas | Mapas base de alto tráfico y baja frecuencia de cambio |
+
+### Pregunta 4: Esquema de seguridad para servicios OGC 
+
+Se propone una arquitectura de *workspaces* segregados por nivel de clasificación:
+
+- Público (p. ej. "Cartografia_UNAL_Publico"): capas de referencia general, acceso sin autenticación, solo lectura (GetMap, GetFeatureInfo, GetCapabilities).
+- Restringido (p. ej. "Cartografia_UNAL_Restringido"): capas sensibles (infraestructura crítica, datos catastrales) que requieren autenticación y autorización por rol.
+
+Mecanismos de autenticación:
+
+- Autenticación básica HTTP como capa mínima, con cambio inmediato de credenciales por defecto (aplicado en este taller).
+- Integración con proveedores externos (LDAP/Active Directory, OAuth2/OIDC) para entornos institucionales.
+- *API keys* o tokens para clientes máquina-a-máquina.
+- Control de acceso basado en roles (RBAC) definido en "Security → Users, Groups, Roles", con reglas de acceso por workspace/capa en "Security → Data".
+- Reglas granulares por operación (lectura vs. escritura), reservando transacciones a roles administrativos.
+- Filtros tipo *layer groups* restringidos para limitar extensión geográfica o atributos visibles según el rol.
+
+
+## Conclusiones
+
+La práctica permitió verificar de forma empírica las diferencias arquitectónicas entre WMS y WFS, documentadas tanto en la construcción manual de peticiones como en el consumo diferenciado desde QGIS, la correcta asignación del CRS en la publicación de capas resultó crítica para evitar desplazamientos geométricos, finalmente, se reconoce que un despliegue en producción exige, más allá de la configuración por defecto de GeoServer, una arquitectura de seguridad en capas (red, transporte, aplicación y dato).
